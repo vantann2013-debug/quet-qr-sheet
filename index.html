@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Quét QR ghi Google Sheets</title>
+
+  <script src="https://unpkg.com/html5-qrcode"></script>
+
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f4f6f8;
+      text-align: center;
+    }
+
+    .container {
+      max-width: 480px;
+      margin: auto;
+      padding: 16px;
+    }
+
+    h2 {
+      margin-top: 16px;
+      color: #111;
+    }
+
+    #reader {
+      width: 100%;
+      max-width: 420px;
+      margin: 16px auto;
+      background: #fff;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    button {
+      width: 48%;
+      padding: 12px;
+      margin: 6px 1%;
+      font-size: 16px;
+      border: none;
+      border-radius: 8px;
+      color: white;
+    }
+
+    #startBtn {
+      background: #1976d2;
+    }
+
+    #stopBtn {
+      background: #d32f2f;
+    }
+
+    #result {
+      margin-top: 14px;
+      padding: 12px;
+      background: white;
+      border-radius: 10px;
+      text-align: left;
+      word-break: break-word;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+
+    .ok {
+      color: green;
+      font-weight: bold;
+    }
+
+    .err {
+      color: red;
+      font-weight: bold;
+    }
+
+    .note {
+      font-size: 14px;
+      color: #555;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h2>QUÉT MÃ QR</h2>
+
+    <div id="reader"></div>
+
+    <button id="startBtn" onclick="startScan()">Bắt đầu quét</button>
+    <button id="stopBtn" onclick="stopScan()">Dừng quét</button>
+
+    <div id="result">
+      Trạng thái: chưa quét.
+    </div>
+
+    <div class="note">
+      Khi trình duyệt hỏi quyền camera, hãy chọn Cho phép.
+    </div>
+  </div>
+
+  <script>
+    const GAS_URL = 'https://script.google.com/macros/s/AKfycbyUSQGcIYJ4nUaUGGoOVNc80ivboKPDN5Jv8jNBUFwIL8552bnf_3oPL7w8YQcNxUpc/exec';
+    const APP_TOKEN = 'tan_luonghoa_2026';
+
+    let html5QrCode;
+    let isScanning = false;
+    let lastQr = '';
+    let lastTime = 0;
+
+    function startScan() {
+      if (isScanning) return;
+
+      html5QrCode = new Html5Qrcode("reader");
+
+      const config = {
+        fps: 10,
+        qrbox: {
+          width: 250,
+          height: 250
+        },
+        rememberLastUsedCamera: true
+      };
+
+      html5QrCode.start(
+        { facingMode: "environment" },
+        config,
+        onScanSuccess,
+        onScanFailure
+      ).then(() => {
+        isScanning = true;
+        showMessage("Đang mở camera, hãy đưa mã QR vào khung quét.");
+      }).catch(err => {
+        showMessage(
+          "<span class='err'>Không mở được camera.</span><br>" +
+          "Hãy kiểm tra quyền camera hoặc mở bằng Chrome/Safari."
+        );
+      });
+    }
+
+    function onScanSuccess(decodedText) {
+      const now = Date.now();
+
+      // Chống ghi trùng trong vòng 5 giây
+      if (decodedText === lastQr && now - lastTime < 5000) {
+        return;
+      }
+
+      lastQr = decodedText;
+      lastTime = now;
+
+      showMessage(
+        "Đã quét được:<br><b>" + escapeHtml(decodedText) + "</b><br>" +
+        "Đang gửi về Google Sheets..."
+      );
+
+      sendToGoogleSheet(decodedText);
+    }
+
+    function onScanFailure(error) {
+      // Không cần hiện lỗi liên tục khi chưa thấy QR
+    }
+
+    function stopScan() {
+      if (html5QrCode && isScanning) {
+        html5QrCode.stop().then(() => {
+          isScanning = false;
+          showMessage("Đã dừng camera.");
+        });
+      }
+    }
+
+    function sendToGoogleSheet(qrText) {
+      const callbackName = 'callback_' + Date.now();
+
+      window[callbackName] = function(response) {
+        if (response.status === 'success') {
+          showMessage(
+            "<span class='ok'>✅ Đã ghi vào Google Sheets</span><br>" +
+            "<b>" + escapeHtml(response.qr) + "</b>"
+          );
+        } else {
+          showMessage(
+            "<span class='err'>❌ Lỗi:</span> " +
+            escapeHtml(response.message)
+          );
+        }
+
+        delete window[callbackName];
+        script.remove();
+      };
+
+      const deviceInfo = navigator.userAgent;
+
+      const url =
+        GAS_URL +
+        '?action=save' +
+        '&token=' + encodeURIComponent(APP_TOKEN) +
+        '&qr=' + encodeURIComponent(qrText) +
+        '&device=' + encodeURIComponent(deviceInfo) +
+        '&callback=' + callbackName;
+
+      const script = document.createElement('script');
+      script.src = url;
+      document.body.appendChild(script);
+    }
+
+    function showMessage(html) {
+      document.getElementById("result").innerHTML = html;
+    }
+
+    function escapeHtml(text) {
+      return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+  </script>
+</body>
+</html>
