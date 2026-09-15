@@ -90,7 +90,7 @@
           <div class="corner"></div>
           <div class="scanLine" id="scanLine"></div>
         </div>
-        <div class="note">Quét V114 TURBO: camera độc lập với Google Sheet; hệ thống gom thích ứng tối đa 10 QR/lần, đồng bộ thống kê ngay trong phản hồi ghi và tự bảo vệ khi API chập chờn.</div>
+        <div class="note">Quét V115 ULTRA: chỉ phát âm khi QR vừa được nhận; camera độc lập với Google Sheet, batch thích ứng, hàng chờ bền vững và giảm tải API để quét liên tục nhanh hơn.</div>
       </div>
       <div>
         <div id="result" class="result"><h2>Sẵn sàng quét</h2><div class="small">Đưa QR trên thẻ đại biểu vào khung camera. Hệ thống sẽ tự động kiểm tra và ghi nhận.</div></div>
@@ -102,13 +102,14 @@
   <canvas id="canvas" class="hidden"></canvas>
 <script>
 'use strict';
-const V114={
+const V115={
   queue:[],sending:false,turbo:false,maxBatch:10,stats:null,statsLoading:false,lastStatsAt:0,
   stream:null,rafId:null,detector:null,decoding:false,lastFrame:0,recent:new Map(),retryTimer:null,
   audio:null,lastLatency:0,avgLatency:0,latSamples:0,lastEnqueueAt:0,warmTimer:null,
-  failures:0,circuitUntil:0,lastSyncAt:0,sessionAccepted:0
+  failures:0,circuitUntil:0,lastSyncAt:0,sessionAccepted:0,
+  persistTimer:null,queueDirty:false,wakeLock:null,lastUiAt:0
 };
-const QKEY='lh_checkin_queue_v114',OLDQ1='lh_checkin_queue_v113',OLDQ2='lh_checkin_queue_v112',AKEY='lh_checkin_api',SKEY='lh_checkin_stats_v114';
+const QKEY='lh_checkin_queue_v115',OLDQ1='lh_checkin_queue_v114',OLDQ2='lh_checkin_queue_v113',OLDQ3='lh_checkin_queue_v112',AKEY='lh_checkin_api',SKEY='lh_checkin_stats_v115';
 const el=id=>document.getElementById(id);
 const qs=name=>new URLSearchParams(location.search).get(name)||'';
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -117,15 +118,24 @@ function normalizeApi(v){v=String(v||'').trim();if(!v)return'';try{v=decodeURICo
 function getApiBase(){return normalizeApi(el('apiUrl').value)}
 function setApiStatus(text,ok){el('apiStatus').textContent=text;const d=document.querySelector('.dot');d.style.background=ok?'#12b76a':'#f79009';d.style.boxShadow=ok?'0 0 0 6px rgba(18,183,106,.16)':'0 0 0 6px rgba(247,144,9,.16)'}
 function updateStatus(extra){
-  const pending=V114.queue.length,mode=V114.turbo?'TURBO X'+V114.maxBatch:'SAFE',ms=V114.avgLatency?Math.round(V114.avgLatency)+'ms':'--';
-  const sync=V114.lastSyncAt?' • sync '+new Date(V114.lastSyncAt).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';
-  setApiStatus(`${mode} • chờ ${pending} • ${ms}${sync}${extra?' • '+extra:''}`,pending===0&&Date.now()>=V114.circuitUntil)
+  const pending=V115.queue.length,mode=V115.turbo?'TURBO X'+V115.maxBatch:'SAFE',ms=V115.avgLatency?Math.round(V115.avgLatency)+'ms':'--';
+  const sync=V115.lastSyncAt?' • sync '+new Date(V115.lastSyncAt).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';
+  setApiStatus(`${mode} • chờ ${pending} • ${ms}${sync}${extra?' • '+extra:''}`,pending===0&&Date.now()>=V115.circuitUntil)
 }
 function toggleConfig(){el('configBox').classList.toggle('show')}
 function initConfig(){let api=normalizeApi(qs('api')||qs('app')||localStorage.getItem(AKEY)||'');if(api){el('apiUrl').value=api;localStorage.setItem(AKEY,api)}else el('configBox').classList.add('show');loadCachedStats()}
 function showMsg(title,type,body,db){const r=el('result');r.className='result '+(type==='ok'?'ok':type==='err'?'err':type==='warn'?'warn':'');let h='<h2>'+esc(title)+'</h2>';if(db){h+='<div class="name">'+esc(db.hoVaTen||'')+'</div><div class="unit">'+esc(db.donViLop||'')+'</div>';if(db.maDaiBieu)h+='<div class="small" style="margin-top:8px">Mã: '+esc(db.maDaiBieu)+'</div>'}if(body)h+='<div class="small" style="margin-top:10px">'+body+'</div>';r.innerHTML=h;r.classList.remove('pulse');void r.offsetWidth;r.classList.add('pulse')}
-function ensureAudio(){try{if(!V114.audio)V114.audio=new (window.AudioContext||window.webkitAudioContext)();if(V114.audio.state==='suspended')V114.audio.resume()}catch(e){}}
-function playTone(kind){ensureAudio();const ctx=V114.audio;if(!ctx)return;try{const seq=kind==='ok'?[880,1180]:kind==='scan'?[660]:[230,180];seq.forEach((f,i)=>{const o=ctx.createOscillator(),g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.frequency.value=f;g.gain.value=kind==='scan'?.025:.055;const t=ctx.currentTime+i*.085;o.start(t);o.stop(t+(kind==='scan'?.05:.10))})}catch(e){}}
+function ensureAudio(){try{if(!V115.audio)V115.audio=new (window.AudioContext||window.webkitAudioContext)();if(V115.audio.state==='suspended')V115.audio.resume()}catch(e){}}
+function playTone(kind){
+  // V115: chỉ phát 1 tiếng khi CAMERA/MÁY QUÉT ĐÃ NHẬN ĐƯỢC QR.
+  // Không phát âm báo thành công, trùng hay lỗi để người trực dễ phân biệt.
+  if(kind!=='scan')return;
+  ensureAudio();const ctx=V115.audio;if(!ctx)return;
+  try{
+    const o=ctx.createOscillator(),g=ctx.createGain();o.connect(g);g.connect(ctx.destination);
+    o.frequency.value=760;g.gain.value=.035;const t=ctx.currentTime;o.start(t);o.stop(t+.065);
+  }catch(e){}
+}
 function jsonp(api,params,timeoutMs){return new Promise((resolve,reject)=>{
   const base=getApiBase();if(!base){reject(new Error('Chưa cấu hình link Apps Script /exec.'));return}
   const p=Object.assign({},params||{},{api,_:Date.now()+'_'+Math.random().toString(36).slice(2,8)}),cb='lh114_'+Date.now()+'_'+Math.floor(Math.random()*1e8);p.callback=cb;
@@ -136,67 +146,97 @@ function jsonp(api,params,timeoutMs){return new Promise((resolve,reject)=>{
   s.async=true;s.referrerPolicy='no-referrer';s.onerror=()=>{if(done)return;done=true;clearTimeout(timer);clean();reject(new Error('Không kết nối được Apps Script API'))};
   s.src=base+'?'+Object.keys(p).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(p[k])).join('&');document.body.appendChild(s)
 })}
-function latency(ms){V114.lastLatency=ms;V114.latSamples++;V114.avgLatency=V114.latSamples===1?ms:(V114.avgLatency*.82+ms*.18);updateStatus()}
-function saveStats(){try{if(V114.stats)localStorage.setItem(SKEY,JSON.stringify({t:Date.now(),s:V114.stats}))}catch(e){}}
+function latency(ms){V115.lastLatency=ms;V115.latSamples++;V115.avgLatency=V115.latSamples===1?ms:(V115.avgLatency*.82+ms*.18);updateStatus()}
+function saveStats(){try{if(V115.stats)localStorage.setItem(SKEY,JSON.stringify({t:Date.now(),s:V115.stats}))}catch(e){}}
 function loadCachedStats(){try{const x=JSON.parse(localStorage.getItem(SKEY)||'null');if(x&&x.s&&Date.now()-Number(x.t||0)<6*3600e3)renderStats(x.s,false)}catch(e){}}
-function renderStats(t,persist=true){if(!t)return;V114.stats={tongDaiBieu:Number(t.tongDaiBieu||0),daDiemDanh:Number(t.daDiemDanh||0),chuaDiemDanh:Number(t.chuaDiemDanh||0),tiLe:Number(t.tiLe||0)};el('tong').textContent=V114.stats.tongDaiBieu;el('da').textContent=V114.stats.daDiemDanh;el('chua').textContent=V114.stats.chuaDiemDanh;el('tile').textContent=V114.stats.tiLe+'%';V114.lastSyncAt=Date.now();if(persist)saveStats();updateStatus()}
+function renderStats(t,persist=true){if(!t)return;V115.stats={tongDaiBieu:Number(t.tongDaiBieu||0),daDiemDanh:Number(t.daDiemDanh||0),chuaDiemDanh:Number(t.chuaDiemDanh||0),tiLe:Number(t.tiLe||0)};el('tong').textContent=V115.stats.tongDaiBieu;el('da').textContent=V115.stats.daDiemDanh;el('chua').textContent=V115.stats.chuaDiemDanh;el('tile').textContent=V115.stats.tiLe+'%';V115.lastSyncAt=Date.now();if(persist)saveStats();updateStatus()}
 async function detectApi(){const t=performance.now();try{
-  const r=await jsonp('ping-v114',{stats:'1'},6500);latency(performance.now()-t);V114.turbo=!!(r&&r.thanhCong&&r.v114);V114.maxBatch=Math.max(1,Math.min(12,Number(r.maxBatch||10)));V114.failures=0;V114.circuitUntil=0;if(r.thongKe)renderStats(r.thongKe);updateStatus(V114.turbo?'stats gộp trong batch':'tương thích V113');return true
+  const r=await jsonp('ping-v114',{stats:'1'},6500);latency(performance.now()-t);V115.turbo=!!(r&&r.thanhCong&&r.v114);V115.maxBatch=Math.max(1,Math.min(12,Number(r.maxBatch||10)));V115.failures=0;V115.circuitUntil=0;if(r.thongKe)renderStats(r.thongKe);updateStatus(V115.turbo?'stats gộp trong batch':'tương thích V113');return true
 }catch(e){
   // fallback V113 không làm gián đoạn hệ thống đang dùng
-  try{const t2=performance.now(),r=await jsonp('ping-v113',{},6500);latency(performance.now()-t2);V114.turbo=!!(r&&r.thanhCong&&r.v113);V114.maxBatch=6;updateStatus('fallback V113');return true}catch(e2){setApiStatus('Lỗi kết nối API',false);showMsg('Không kết nối được API','err',esc(e2.message));return false}
+  try{const t2=performance.now(),r=await jsonp('ping-v113',{},6500);latency(performance.now()-t2);V115.turbo=!!(r&&r.thanhCong&&r.v113);V115.maxBatch=6;updateStatus('fallback V113');return true}catch(e2){setApiStatus('Lỗi kết nối API',false);showMsg('Không kết nối được API','err',esc(e2.message));return false}
 }}
-async function saveConfig(){const api=getApiBase();if(!api){showMsg('Thiếu API','err','Hãy dán link Web App kết thúc bằng <b>/exec</b>.');return}localStorage.setItem(AKEY,api);el('apiUrl').value=api;ensureAudio();showMsg('Đang kiểm tra API','','Đang đo kết nối và đồng bộ thống kê...');if(await detectApi()){showMsg(V114.maxBatch>=10?'V114 TURBO đã sẵn sàng':'API đã sẵn sàng','ok',V114.maxBatch>=10?'Batch thích ứng, thống kê đồng bộ ngay trong lượt ghi.':'Đang chạy chế độ tương thích.');processQueue()}}
-function saveQueue(){try{localStorage.setItem(QKEY,JSON.stringify(V114.queue))}catch(e){}}
-function loadQueue(){try{let a=JSON.parse(localStorage.getItem(QKEY)||'null');if(!Array.isArray(a))a=JSON.parse(localStorage.getItem(OLDQ1)||'null');if(!Array.isArray(a))a=JSON.parse(localStorage.getItem(OLDQ2)||'[]');const min=Date.now()-45*60*1000;V114.queue=(Array.isArray(a)?a:[]).filter(x=>x&&x.id&&x.qr&&Number(x.ts||0)>=min);localStorage.removeItem(OLDQ1);localStorage.removeItem(OLDQ2)}catch(e){V114.queue=[]}saveQueue();updateStatus()}
-function recentHit(code){const now=Date.now(),last=V114.recent.get(code)||0;V114.recent.set(code,now);if(V114.recent.size>200){for(const[k,t]of V114.recent){if(now-t>8000)V114.recent.delete(k)}}return now-last<1800}
-function enqueueCode(raw){raw=String(raw||'').trim();if(!raw||recentHit(raw))return;const item={id:uid(),qr:raw,ts:Date.now(),attempts:0,nextAt:0,device:navigator.userAgent.slice(0,100)};V114.queue.push(item);V114.lastEnqueueAt=Date.now();saveQueue();playTone('scan');showMsg('Đã nhận QR','','Đã lưu an toàn. Có thể quét thẻ tiếp theo ngay, không cần chờ Google Sheet.');updateStatus('đã nhận');scheduleQueue()}
+async function saveConfig(){const api=getApiBase();if(!api){showMsg('Thiếu API','err','Hãy dán link Web App kết thúc bằng <b>/exec</b>.');return}localStorage.setItem(AKEY,api);el('apiUrl').value=api;ensureAudio();showMsg('Đang kiểm tra API','','Đang đo kết nối và đồng bộ thống kê...');if(await detectApi()){showMsg(V115.maxBatch>=10?'V115 ULTRA đã sẵn sàng':'API đã sẵn sàng','ok',V115.maxBatch>=10?'Batch thích ứng, thống kê đồng bộ ngay trong lượt ghi.':'Đang chạy chế độ tương thích.');processQueue()}}
+function persistQueueNow(){
+  try{localStorage.setItem(QKEY,JSON.stringify(V115.queue));V115.queueDirty=false}catch(e){}
+}
+function saveQueue(){
+  V115.queueDirty=true;
+  if(V115.persistTimer)return;
+  const flush=()=>{V115.persistTimer=null;if(V115.queueDirty)persistQueueNow()};
+  if('requestIdleCallback' in window){V115.persistTimer=requestIdleCallback(flush,{timeout:120})}
+  else{V115.persistTimer=setTimeout(flush,70)}
+}
+function loadQueue(){try{let a=JSON.parse(localStorage.getItem(QKEY)||'null');if(!Array.isArray(a))a=JSON.parse(localStorage.getItem(OLDQ1)||'null');if(!Array.isArray(a))a=JSON.parse(localStorage.getItem(OLDQ2)||'null');if(!Array.isArray(a))a=JSON.parse(localStorage.getItem(OLDQ3)||'[]');const min=Date.now()-45*60*1000;V115.queue=(Array.isArray(a)?a:[]).filter(x=>x&&x.id&&x.qr&&Number(x.ts||0)>=min);localStorage.removeItem(OLDQ1);localStorage.removeItem(OLDQ2);localStorage.removeItem(OLDQ3)}catch(e){V115.queue=[]}saveQueue();updateStatus()}
+function recentHit(code){const now=Date.now(),last=V115.recent.get(code)||0;V115.recent.set(code,now);if(V115.recent.size>200){for(const[k,t]of V115.recent){if(now-t>8000)V115.recent.delete(k)}}return now-last<1800}
+function enqueueCode(raw){raw=String(raw||'').trim();if(!raw||recentHit(raw))return;const item={id:uid(),qr:raw,ts:Date.now(),attempts:0,nextAt:0,device:navigator.userAgent.slice(0,100)};V115.queue.push(item);V115.lastEnqueueAt=Date.now();saveQueue();playTone('scan');if(Date.now()-V115.lastUiAt>180){V115.lastUiAt=Date.now();showMsg('Đã nhận QR','','Đã lưu an toàn. Có thể quét thẻ tiếp theo ngay, không cần chờ Google Sheet.')}updateStatus('đã nhận');scheduleQueue()}
 function retryDelay(a){const v=[220,380,650,1100,1800,3000,5000,8000][Math.min(a,7)];return v+Math.floor(Math.random()*150)}
-function removeByIds(ids){if(!ids||!ids.size)return;V114.queue=V114.queue.filter(x=>!ids.has(x.id));saveQueue()}
+function removeByIds(ids){if(!ids||!ids.size)return;V115.queue=V115.queue.filter(x=>!ids.has(x.id));saveQueue()}
 function markRetry(items,delay){const now=Date.now();items.forEach(x=>{x.attempts=(x.attempts||0)+1;x.nextAt=now+Math.max(delay||0,retryDelay(x.attempts))});saveQueue()}
-function eligibleBatch(){const now=Date.now(),a=[];for(const x of V114.queue){if((x.nextAt||0)>now)continue;a.push(x);if(a.length>=V114.maxBatch)break}return a}
+function adaptiveBatchLimit(){
+  const q=V115.queue.length, max=Math.max(1,V115.maxBatch||10), lat=Number(V115.avgLatency||0);
+  if(q>=8)return max;
+  if(q>=5)return Math.min(max,8);
+  if(q>=3)return Math.min(max,6);
+  if(q>=2)return Math.min(max,4);
+  // Một đại biểu: gửi ngay, không chờ đủ batch.
+  return 1;
+}
+function eligibleBatch(){const now=Date.now(),a=[],limit=adaptiveBatchLimit();for(const x of V115.queue){if((x.nextAt||0)>now)continue;a.push(x);if(a.length>=limit)break}return a}
+function apiTimeoutMs(){
+  const lat=Number(V115.avgLatency||0);
+  const conn=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
+  const rtt=conn&&Number(conn.rtt||0)||0;
+  return Math.max(4200,Math.min(9500,Math.round(Math.max(lat*2.15+900,rtt*5+3500,4800))));
+}
 function fitBatchForUrl(items){let b=items.slice();while(b.length>1){const compact=b.map(x=>({id:x.id,qr:x.qr}));if(encodeURIComponent(JSON.stringify(compact)).length<6200)break;b.pop()}return b}
-function scheduleQueue(){if(V114.sending)return;clearTimeout(V114.retryTimer);const q=V114.queue.length;if(!q)return;const wait=q>=4?10:q>=2?35:70;V114.retryTimer=setTimeout(processQueue,wait)}
-function handleResults(results){let ok=0,last=null,dup=null,bad=null;const done=new Set();(results||[]).forEach(r=>{if(!r)return;const id=String(r.requestId||'');if(r.canThuLai)return;if(id)done.add(id);if(r.thanhCong){if(r.trungLap){dup=r}else{ok++;last=r}}else bad=r});removeByIds(done);V114.sessionAccepted+=ok;if(last){showMsg('Điểm danh thành công','ok',ok>1?`Đã ghi ${ok} đại biểu trong một lượt.`:'Đã ghi chính xác vào Google Sheet.',last.daiBieu);playTone('ok')}else if(dup){showMsg('Đã điểm danh trước đó','warn',esc(dup.thongBao||''),dup.daiBieu);playTone('err')}else if(bad){showMsg('QR không hợp lệ','err',esc(bad.thongBao||'Không điểm danh được.'));playTone('err')}}
-function openCircuit(){V114.failures++;if(V114.failures>=3){V114.circuitUntil=Date.now()+2200;updateStatus('API nghỉ 2s')}}
+function scheduleQueue(){
+  if(V115.sending)return;clearTimeout(V115.retryTimer);const q=V115.queue.length;if(!q)return;
+  // V115: batch thích ứng nhưng ưu tiên phản hồi tức thời.
+  const wait=q>=4?0:q>=2?12:28;V115.retryTimer=setTimeout(processQueue,wait)
+}
+function handleResults(results){let ok=0,last=null,dup=null,bad=null;const done=new Set();(results||[]).forEach(r=>{if(!r)return;const id=String(r.requestId||'');if(r.canThuLai)return;if(id)done.add(id);if(r.thanhCong){if(r.trungLap){dup=r}else{ok++;last=r}}else bad=r});removeByIds(done);V115.sessionAccepted+=ok;if(last){showMsg('Điểm danh thành công','ok',ok>1?`Đã ghi ${ok} đại biểu trong một lượt.`:'Đã ghi chính xác vào Google Sheet.',last.daiBieu)}else if(dup){showMsg('Đã điểm danh trước đó','warn',esc(dup.thongBao||''),dup.daiBieu)}else if(bad){showMsg('QR không hợp lệ','err',esc(bad.thongBao||'Không điểm danh được.'))}}
+function openCircuit(){V115.failures++;if(V115.failures>=3){V115.circuitUntil=Date.now()+2200;updateStatus('API nghỉ 2s')}}
 function processQueue(){
-  if(V114.sending||!V114.queue.length){updateStatus();return}
+  if(V115.sending||!V115.queue.length){updateStatus();return}
   if(!navigator.onLine){updateStatus('mất mạng');return}
-  const now=Date.now();if(now<V114.circuitUntil){clearTimeout(V114.retryTimer);V114.retryTimer=setTimeout(processQueue,V114.circuitUntil-now+30);return}
-  let batch=eligibleBatch();if(!batch.length){const next=Math.min(...V114.queue.map(x=>x.nextAt||Date.now()+300));V114.retryTimer=setTimeout(processQueue,Math.max(80,next-Date.now()));return}
+  const now=Date.now();if(now<V115.circuitUntil){clearTimeout(V115.retryTimer);V115.retryTimer=setTimeout(processQueue,V115.circuitUntil-now+30);return}
+  let batch=eligibleBatch();if(!batch.length){const next=Math.min(...V115.queue.map(x=>x.nextAt||Date.now()+300));V115.retryTimer=setTimeout(processQueue,Math.max(80,next-Date.now()));return}
   batch=fitBatchForUrl(batch);
-  V114.sending=true;updateStatus(`đang ghi ${batch.length}`);const t=performance.now();
-  const api=V114.maxBatch>=10?'checkin-batch-v114':'checkin-batch-v113';
+  V115.sending=true;updateStatus(`đang ghi ${batch.length}`);const t=performance.now();
+  const api=V115.maxBatch>=10?'checkin-batch-v114':'checkin-batch-v113';
   const items=JSON.stringify(batch.map(x=>({id:x.id,qr:x.qr})));
-  jsonp(api,{items,thietBi:navigator.userAgent.slice(0,100)},6200).then(res=>{
-    V114.sending=false;latency(performance.now()-t);V114.failures=0;V114.circuitUntil=0;
+  jsonp(api,{items,thietBi:navigator.userAgent.slice(0,100)},apiTimeoutMs()).then(res=>{
+    V115.sending=false;latency(performance.now()-t);V115.failures=0;V115.circuitUntil=0;
     if(res&&res.thanhCong&&Array.isArray(res.results)){
-      handleResults(res.results);if(res.thongKe)renderStats(res.thongKe);else if(res.stats)renderStats(res.stats);else if(!V114.queue.length)setTimeout(()=>loadStats(true),500);
+      handleResults(res.results);if(res.thongKe)renderStats(res.thongKe);else if(res.stats)renderStats(res.stats);else if(!V115.queue.length)setTimeout(()=>loadStats(true),500);
     }else if(res&&res.canThuLai){markRetry(batch,Number(res.busyMs||180))}
     else{markRetry(batch,500);showMsg('Máy chủ chưa nhận lượt ghi','warn',esc(res&&res.thongBao?res.thongBao:'Đang tự thử lại.'))}
     scheduleQueue();
   }).catch(err=>{
-    V114.sending=false;openCircuit();markRetry(batch,0);updateStatus('tự thử lại');if((batch[0].attempts||0)===1)showMsg('Kết nối chập chờn','warn','QR vẫn nằm an toàn trong hàng chờ; hệ thống sẽ tự gửi lại.');scheduleQueue()
+    V115.sending=false;openCircuit();markRetry(batch,0);updateStatus('tự thử lại');if((batch[0].attempts||0)===1)showMsg('Kết nối chập chờn','warn','QR vẫn nằm an toàn trong hàng chờ; hệ thống sẽ tự gửi lại.');scheduleQueue()
   })
 }
-function loadStats(force){if(!getApiBase()||V114.statsLoading)return;if((V114.sending||V114.queue.length)&&!force)return;const now=Date.now();if(!force&&now-V114.lastStatsAt<120000)return;V114.statsLoading=true;V114.lastStatsAt=now;const api=V114.maxBatch>=10?'stats-v114':'stats-v113';jsonp(api,{},6000).then(r=>{V114.statsLoading=false;if(r&&r.thanhCong)renderStats(r.thongKe||r)}).catch(()=>{V114.statsLoading=false})}
+function loadStats(force){if(!getApiBase()||V115.statsLoading)return;if((V115.sending||V115.queue.length)&&!force)return;const now=Date.now();if(!force&&now-V115.lastStatsAt<300000)return;V115.statsLoading=true;V115.lastStatsAt=now;const api=V115.maxBatch>=10?'stats-v114':'stats-v113';jsonp(api,{},6000).then(r=>{V115.statsLoading=false;if(r&&r.thanhCong)renderStats(r.thongKe||r)}).catch(()=>{V115.statsLoading=false})}
 function submitManual(){const x=el('manualInput');enqueueCode(x.value);x.value=''}
 function focusManual(){el('manualInput').focus();ensureAudio();showMsg('Chế độ máy quét USB','','Quét liên tục; mỗi mã được đưa vào hàng chờ ngay.')}
 el('manualInput').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();submitManual()}});
 async function listCameras(){try{const devs=await navigator.mediaDevices.enumerateDevices(),cams=devs.filter(d=>d.kind==='videoinput'),sel=el('cameraSelect');sel.innerHTML='<option value="">Camera sau / tự động</option>';cams.forEach((c,i)=>{const o=document.createElement('option');o.value=c.deviceId;o.textContent=c.label||('Camera '+(i+1));sel.appendChild(o)})}catch(e){}}
 async function tuneTrack(track){try{const cap=track.getCapabilities?track.getCapabilities():{},adv={};if(cap.focusMode&&cap.focusMode.includes('continuous'))adv.focusMode='continuous';if(cap.exposureMode&&cap.exposureMode.includes('continuous'))adv.exposureMode='continuous';if(Object.keys(adv).length)await track.applyConstraints({advanced:[adv]})}catch(e){}}
-async function startCamera(){ensureAudio();if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){showMsg('Trình duyệt không hỗ trợ camera','err','Hãy dùng Chrome/Safari mới hoặc máy quét QR USB.');return}stopCamera();try{if('BarcodeDetector'in window){try{V114.detector=new BarcodeDetector({formats:['qr_code']})}catch(e){V114.detector=null}}const id=el('cameraSelect').value,video=id?{deviceId:{exact:id},width:{ideal:1280},height:{ideal:720}}:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}};V114.stream=await navigator.mediaDevices.getUserMedia({video,audio:false});const v=el('video');v.srcObject=V114.stream;await v.play();const tr=V114.stream.getVideoTracks()[0];if(tr)await tuneTrack(tr);await listCameras();showMsg('Đang quét V114 TURBO','','Camera nhận QR độc lập với API; quét liên tục không cần chờ ghi Sheet.');scanLoop()}catch(e){showMsg('Không mở được camera','err',esc((e&&e.message)||String(e)))}}
-function stopCamera(){if(V114.rafId)cancelAnimationFrame(V114.rafId);V114.rafId=null;if(V114.stream){V114.stream.getTracks().forEach(t=>t.stop());V114.stream=null}V114.detector=null;V114.decoding=false}
-function scanLoop(){const video=el('video'),canvas=el('canvas'),ctx=canvas.getContext('2d',{willReadFrequently:true});const tick=async ts=>{if(!V114.stream)return;const native=!!V114.detector,interval=native?42:78;if(!V114.decoding&&video.readyState===video.HAVE_ENOUGH_DATA&&ts-V114.lastFrame>interval){V114.lastFrame=ts;V114.decoding=true;let code='';try{if(V114.detector){try{const a=await V114.detector.detect(video);if(a&&a[0])code=a[0].rawValue||''}catch(e){V114.detector=null}}else if(window.jsQR){const vw=video.videoWidth||640,vh=video.videoHeight||480,cw=Math.floor(vw*.68),ch=Math.floor(vh*.68),sx=Math.floor((vw-cw)/2),sy=Math.floor((vh-ch)/2),scale=Math.min(1,520/Math.max(cw,ch));canvas.width=Math.max(300,Math.round(cw*scale));canvas.height=Math.max(220,Math.round(ch*scale));ctx.drawImage(video,sx,sy,cw,ch,0,0,canvas.width,canvas.height);const img=ctx.getImageData(0,0,canvas.width,canvas.height),r=jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'});if(r)code=r.data||''}}finally{V114.decoding=false}if(code)enqueueCode(code)}V114.rafId=requestAnimationFrame(tick)};V114.rafId=requestAnimationFrame(tick)}
-function warmApi(){if(document.visibilityState!=='visible'||!getApiBase()||V114.sending||V114.queue.length)return;const api=V114.maxBatch>=10?'ping-v114':'ping-v113';jsonp(api,{},4500).then(r=>{if(r&&r.thongKe)renderStats(r.thongKe)}).catch(()=>{})}
+async function requestWakeLock(){try{if('wakeLock' in navigator){V115.wakeLock=await navigator.wakeLock.request('screen')}}catch(e){}}
+async function releaseWakeLock(){try{if(V115.wakeLock){await V115.wakeLock.release();V115.wakeLock=null}}catch(e){}}
+async function startCamera(){ensureAudio();requestWakeLock();if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){showMsg('Trình duyệt không hỗ trợ camera','err','Hãy dùng Chrome/Safari mới hoặc máy quét QR USB.');return}stopCamera();try{if('BarcodeDetector'in window){try{V115.detector=new BarcodeDetector({formats:['qr_code']})}catch(e){V115.detector=null}}const id=el('cameraSelect').value,video=id?{deviceId:{exact:id},width:{ideal:1280},height:{ideal:720}}:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}};V115.stream=await navigator.mediaDevices.getUserMedia({video,audio:false});const v=el('video');v.srcObject=V115.stream;await v.play();const tr=V115.stream.getVideoTracks()[0];if(tr)await tuneTrack(tr);await listCameras();showMsg('Đang quét V115 ULTRA','','Mỗi tiếng bíp = QR đã được nhận vào hàng chờ. Không có âm báo thành công để tránh nhầm.');scanLoop()}catch(e){showMsg('Không mở được camera','err',esc((e&&e.message)||String(e)))}}
+function stopCamera(){releaseWakeLock();if(V115.rafId)cancelAnimationFrame(V115.rafId);V115.rafId=null;if(V115.stream){V115.stream.getTracks().forEach(t=>t.stop());V115.stream=null}V115.detector=null;V115.decoding=false}
+function scanLoop(){const video=el('video'),canvas=el('canvas'),ctx=canvas.getContext('2d',{willReadFrequently:true});const tick=async ts=>{if(!V115.stream)return;const native=!!V115.detector,interval=native?34:72;if(!V115.decoding&&video.readyState===video.HAVE_ENOUGH_DATA&&ts-V115.lastFrame>interval){V115.lastFrame=ts;V115.decoding=true;let code='';try{if(V115.detector){try{const a=await V115.detector.detect(video);if(a&&a[0])code=a[0].rawValue||''}catch(e){V115.detector=null}}else if(window.jsQR){const vw=video.videoWidth||640,vh=video.videoHeight||480,cw=Math.floor(vw*.68),ch=Math.floor(vh*.68),sx=Math.floor((vw-cw)/2),sy=Math.floor((vh-ch)/2),scale=Math.min(1,520/Math.max(cw,ch));canvas.width=Math.max(300,Math.round(cw*scale));canvas.height=Math.max(220,Math.round(ch*scale));ctx.drawImage(video,sx,sy,cw,ch,0,0,canvas.width,canvas.height);const img=ctx.getImageData(0,0,canvas.width,canvas.height),r=jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'});if(r)code=r.data||''}}finally{V115.decoding=false}if(code)enqueueCode(code)}V115.rafId=requestAnimationFrame(tick)};V115.rafId=requestAnimationFrame(tick)}
+function warmApi(){if(document.visibilityState!=='visible'||!getApiBase()||V115.sending||V115.queue.length)return;const api=V115.maxBatch>=10?'ping-v114':'ping-v113';jsonp(api,{},4500).then(r=>{if(r&&r.thongKe)renderStats(r.thongKe)}).catch(()=>{})}
 window.addEventListener('online',()=>{updateStatus('đã có mạng');scheduleQueue();loadStats(false)});
 window.addEventListener('offline',()=>updateStatus('mất mạng'));
-window.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){scheduleQueue();warmApi()}});
-window.addEventListener('beforeunload',()=>{saveQueue();stopCamera()});
+window.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){if(V115.stream)requestWakeLock();scheduleQueue();warmApi()}});
+window.addEventListener('pagehide',persistQueueNow);window.addEventListener('beforeunload',()=>{persistQueueNow();stopCamera()});
 initConfig();loadQueue();listCameras();
 setTimeout(async()=>{if(getApiBase()){await detectApi();scheduleQueue()}},250);
-setInterval(()=>{if(document.visibilityState==='visible'&&!V114.sending&&!V114.queue.length)loadStats(false)},120000);
-V114.warmTimer=setInterval(warmApi,120000);
+setInterval(()=>{if(document.visibilityState==='visible'&&!V115.sending&&!V115.queue.length)loadStats(false)},300000);
+V115.warmTimer=setInterval(warmApi,180000);
 
 </script>
 </body>
