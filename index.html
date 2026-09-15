@@ -304,6 +304,152 @@ function submitCode(raw){
 setTimeout(function(){loadStats(true);},700);
 setInterval(function(){if(getApiBase()&&!document.hidden&&!v110Sending)loadStats(false);},30000);
 
+
+
+// ===== V111: HÀNG CHỜ SIÊU NHANH + API GHI BẮT BUỘC VÀO SHEET ĐIỂM DANH =====
+var v111Queue=[], v111Sending=false, v111LastStatsAt=0, v111StatsLoading=false, v111Stats=null;
+function v111ApiBase(){
+  var v=(document.getElementById('apiUrl').value||'').trim();
+  try{v=decodeURIComponent(v);}catch(e){}
+  v=v.replace(/\/dev(\?|$)/,'/exec$1');
+  return v.replace(/\?.*$/,'');
+}
+function v111CallOnce(api,params,timeoutMs){
+  return new Promise(function(resolve,reject){
+    var base=v111ApiBase();
+    if(!base){reject(new Error('Chưa nhập link Apps Script /exec.'));return;}
+    params=params||{};
+    params.api=api;
+    params.fast='1';
+    params._=Date.now()+'_'+Math.floor(Math.random()*999999);
+    var cb='lh_v111_'+Date.now()+'_'+Math.floor(Math.random()*999999);
+    params.callback=cb;
+    var script=document.createElement('script');
+    var done=false,timer=null;
+    window[cb]=function(res){
+      if(done)return; done=true; clearTimeout(timer);
+      try{delete window[cb];}catch(e){window[cb]=null;}
+      if(script.parentNode)script.parentNode.removeChild(script);
+      resolve(res||{});
+    };
+    var q=Object.keys(params).map(function(k){return encodeURIComponent(k)+'='+encodeURIComponent(params[k]);}).join('&');
+    script.async=true;
+    script.referrerPolicy='no-referrer';
+    script.onerror=function(){
+      if(done)return; done=true; clearTimeout(timer);
+      try{delete window[cb];}catch(e){window[cb]=null;}
+      if(script.parentNode)script.parentNode.removeChild(script);
+      reject(new Error('Không gọi được API. Kiểm tra link /exec mới nhất, Deploy Web App: Execute as Me và Anyone.'));
+    };
+    script.src=base+(base.indexOf('?')>=0?'&':'?')+q;
+    document.body.appendChild(script);
+    timer=setTimeout(function(){
+      if(done)return; done=true;
+      try{delete window[cb];}catch(e){window[cb]=null;}
+      if(script.parentNode)script.parentNode.removeChild(script);
+      reject(new Error('API phản hồi chậm, hệ thống sẽ tự thử lại.'));
+    },timeoutMs||9000);
+  });
+}
+function callApi(api,params){
+  return v111CallOnce(api,params,8500).catch(function(){
+    return new Promise(function(r){setTimeout(r,250);}).then(function(){return v111CallOnce(api,params,11000);});
+  }).catch(function(){
+    return new Promise(function(r){setTimeout(r,650);}).then(function(){return v111CallOnce(api,params,15000);});
+  });
+}
+function updateStats(tk){
+  if(!tk)return;
+  v111Stats={
+    tongDaiBieu:Number(tk.tongDaiBieu||0),
+    daDiemDanh:Number(tk.daDiemDanh||0),
+    chuaDiemDanh:Number(tk.chuaDiemDanh||0),
+    tiLe:Number(tk.tiLe||0)
+  };
+  document.getElementById('tong').textContent=v111Stats.tongDaiBieu;
+  document.getElementById('da').textContent=v111Stats.daDiemDanh;
+  document.getElementById('chua').textContent=v111Stats.chuaDiemDanh;
+  document.getElementById('tile').textContent=v111Stats.tiLe+'%';
+  setApiStatus('API sẵn sàng',true);
+}
+function v111UpdateLocalStats(res){
+  if(!v111Stats||!res||res.trungLap)return;
+  v111Stats.daDiemDanh=Math.min(v111Stats.tongDaiBieu||999999, v111Stats.daDiemDanh+1);
+  v111Stats.chuaDiemDanh=Math.max(0, (v111Stats.tongDaiBieu||0)-v111Stats.daDiemDanh);
+  v111Stats.tiLe=v111Stats.tongDaiBieu?Math.round(v111Stats.daDiemDanh*1000/v111Stats.tongDaiBieu)/10:0;
+  document.getElementById('da').textContent=v111Stats.daDiemDanh;
+  document.getElementById('chua').textContent=v111Stats.chuaDiemDanh;
+  document.getElementById('tile').textContent=v111Stats.tiLe+'%';
+}
+function loadStats(force){
+  if(!v111ApiBase()){setApiStatus('Chưa cấu hình API',false);return;}
+  var now=Date.now();
+  if(!force && now-v111LastStatsAt<60000)return;
+  if(v111StatsLoading||v111Sending)return;
+  v111StatsLoading=true; v111LastStatsAt=now;
+  callApi('thong-ke-diem-danh',{}).then(function(res){
+    v111StatsLoading=false;
+    if(res&&res.thanhCong){updateStats(res);}else{setApiStatus('Không tải được thống kê',false);}
+  }).catch(function(err){
+    v111StatsLoading=false;
+    setApiStatus('Lỗi kết nối API',false);
+    console.warn(err);
+  });
+}
+function v111ProcessQueue(){
+  if(v111Sending||!v111Queue.length)return;
+  var raw=v111Queue.shift();
+  v111Sending=true; busy=true;
+  playTone('scan');
+  showMsg('Đã nhận QR','','Đang ghi vào sheet ĐIỂM DANH...');
+  callApi('diem-danh-sieu-nhanh',{qr:raw,thietBi:navigator.userAgent.substring(0,90)}).then(function(res){
+    v111Sending=false; busy=false;
+    if(res&&res.thanhCong){
+      if(res.trungLap){
+        showMsg('Đã điểm danh trước đó','warn',esc(res.thongBao||'Đã ghi lịch sử quét trùng.'),res.daiBieu);
+        playTone('err');
+      }else{
+        showMsg('Điểm danh thành công','ok','Đã ghi vào sheet ĐIỂM DANH.',res.daiBieu);
+        playTone('ok');
+        v111UpdateLocalStats(res);
+      }
+      setApiStatus('Đã ghi sheet ĐIỂM DANH',true);
+    }else if(res&&res.canThuLai){
+      v111Queue.unshift(raw);
+      showMsg('Đang chờ ghi','warn',esc(res.thongBao||'Tự thử lại sau 1 giây.'));
+      setTimeout(v111ProcessQueue,800);return;
+    }else{
+      showMsg('Không điểm danh được','err',esc(res&&res.thongBao?res.thongBao:'QR không hợp lệ.'));
+      playTone('err');
+    }
+    setTimeout(v111ProcessQueue,80);
+  }).catch(function(err){
+    v111Sending=false; busy=false;
+    v111Queue.unshift(raw);
+    showMsg('API đang chậm','warn',esc(err.message)+'<br>QR đã được giữ trong hàng chờ và sẽ tự gửi lại.');
+    playTone('err');
+    setTimeout(v111ProcessQueue,1200);
+  });
+}
+function submitCode(raw){
+  raw=(raw||'').trim();
+  if(!raw)return;
+  var now=Date.now();
+  if(raw===lastCode && now-lastAt<1600)return;
+  lastCode=raw; lastAt=now;
+  v111Queue.push(raw);
+  v111ProcessQueue();
+}
+function saveConfig(){
+  var api=v111ApiBase();
+  if(api)localStorage.setItem('lh_checkin_api',api);
+  showMsg('Đã lưu API','ok','Có thể bắt đầu quét QR điểm danh.');
+  setApiStatus('API đã lưu',true);
+  loadStats(true);
+}
+setTimeout(function(){loadStats(true);},800);
+setInterval(function(){if(v111ApiBase()&&!document.hidden&&!v111Sending)loadStats(false);},60000);
+
 </script>
 </body>
 </html>
